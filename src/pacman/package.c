@@ -559,12 +559,23 @@ int dump_pkg_search(alpm_db_t *db, alpm_list_t *targets, int show_status)
 	for(i = searchlist; i; i = alpm_list_next(i)) {
 		alpm_pkg_t *pkg = i->data;
 
+		if(!filter(pkg)) {
+			continue;
+		}
+
 		if(config->quiet) {
 			fputs(alpm_pkg_get_name(pkg), stdout);
 		} else {
 			printf("%s%s/%s%s %s%s%s", colstr->repo, alpm_db_get_name(db),
 					colstr->title, alpm_pkg_get_name(pkg),
 					colstr->version, alpm_pkg_get_version(pkg), colstr->nocolor);
+
+			if(config->op_q_upgrade) {
+				alpm_pkg_t *newpkg =
+					alpm_sync_get_new_version(pkg, alpm_get_syncdbs(config->handle));
+				printf(" -> %s%s%s", colstr->version, alpm_pkg_get_version(newpkg),
+					colstr->nocolor);
+			}
 
 			print_groups(pkg);
 			if(show_status) {

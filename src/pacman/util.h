@@ -89,6 +89,7 @@ void console_cursor_move_end(void);
 /* Erases line from the current cursor position till the end of the line */
 void console_erase_line(void);
 char *resolve_path(const char *path, const char *option);
+int filter(alpm_pkg_t *pkg);
 
 int pm_printf(alpm_loglevel_t level, const char *format, ...) __attribute__((format(printf,2,3)));
 int pm_asprintf(char **string, const char *format, ...) __attribute__((format(printf,2,3)));

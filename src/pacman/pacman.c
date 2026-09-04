@@ -690,7 +690,6 @@ static void checkargs_query(void)
 		invalid_opt(config->group, "--search", "--groups");
 		invalid_opt(config->op_q_owns, "--search", "--owns");
 		checkargs_query_display_opts("--search");
-		checkargs_query_filter_opts("--search");
 	} else if(config->op_q_owns) {
 		invalid_opt(config->group, "--owns", "--groups");
 		checkargs_query_display_opts("--owns");

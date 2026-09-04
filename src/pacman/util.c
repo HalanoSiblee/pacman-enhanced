@@ -1979,3 +1979,60 @@ char *resolve_path(const char *path, const char *option)
 
 	return resolved;
 }
+
+static unsigned short pkg_get_locality(alpm_pkg_t *pkg)
+{
+	const char *pkgname = alpm_pkg_get_name(pkg);
+	alpm_list_t *j;
+	alpm_list_t *sync_dbs = alpm_get_syncdbs(config->handle);
+
+	for(j = sync_dbs; j; j = alpm_list_next(j)) {
+		if(alpm_db_get_pkg(j->data, pkgname)) {
+			return PKG_LOCALITY_NATIVE;
+		}
+	}
+	return PKG_LOCALITY_FOREIGN;
+}
+
+static int is_unrequired(alpm_pkg_t *pkg, unsigned short level)
+{
+	alpm_list_t *requiredby = alpm_pkg_compute_requiredby(pkg);
+	if(requiredby == NULL) {
+		if(level == 1) {
+			requiredby = alpm_pkg_compute_optionalfor(pkg);
+		}
+		if(requiredby == NULL) {
+			return 1;
+		}
+	}
+	FREELIST(requiredby);
+	return 0;
+}
+
+int filter(alpm_pkg_t *pkg)
+{
+	/* check if this package was explicitly installed */
+	if(config->op_q_explicit &&
+			alpm_pkg_get_reason(pkg) != ALPM_PKG_REASON_EXPLICIT) {
+		return 0;
+	}
+	/* check if this package was installed as a dependency */
+	if(config->op_q_deps &&
+			alpm_pkg_get_reason(pkg) != ALPM_PKG_REASON_DEPEND) {
+		return 0;
+	}
+	/* check if this pkg is or isn't in a sync DB */
+	if(config->op_q_locality && config->op_q_locality != pkg_get_locality(pkg)) {
+		return 0;
+	}
+	/* check if this pkg is unrequired */
+	if(config->op_q_unrequired && !is_unrequired(pkg, config->op_q_unrequired)) {
+		return 0;
+	}
+	/* check if this pkg is outdated */
+	if(config->op_q_upgrade && (alpm_sync_get_new_version(pkg,
+					alpm_get_syncdbs(config->handle)) == NULL)) {
+		return 0;
+	}
+	return 1;
+}
