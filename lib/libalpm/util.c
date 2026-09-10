@@ -50,6 +50,7 @@
 #ifdef HAVE_LIBNETTLE
 #include <nettle/md5.h>
 #include <nettle/sha2.h>
+#include <nettle/version.h>
 #endif
 
 /* libalpm */
@@ -1096,6 +1097,8 @@ static int md5_file(const char *path, unsigned char output[16])
 #if HAVE_LIBSSL
 	EVP_DigestFinal_ex(ctx, output, NULL);
 	EVP_MD_CTX_destroy(ctx);
+#elif NETTLE_VERSION_MAJOR >= 4
+	md5_digest(&ctx, output);
 #else /* HAVE_LIBNETTLE */
 	md5_digest(&ctx, MD5_DIGEST_SIZE, output);
 #endif
@@ -1155,6 +1158,8 @@ static int sha256_file(const char *path, unsigned char output[32])
 #if HAVE_LIBSSL
 	EVP_DigestFinal_ex(ctx, output, NULL);
 	EVP_MD_CTX_destroy(ctx);
+#elif NETTLE_VERSION_MAJOR >= 4
+	sha256_digest(&ctx, output);
 #else /* HAVE_LIBNETTLE */
 	sha256_digest(&ctx, SHA256_DIGEST_SIZE, output);
 #endif
