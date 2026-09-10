@@ -38,14 +38,7 @@
 
 bool _alpm_use_sandbox(alpm_handle_t *handle)
 {
-	if(handle->user == 0 && 
-	   handle->sandboxuser != NULL && 
-	   (handle->disable_sandbox_filesystem == 0 || handle->disable_sandbox_syscalls == 0))
-	{
-		return true;
-	}
-
-	return false;
+	return handle->user == 0 && handle->sandboxuser != NULL;
 }
 
 int SYMEXPORT alpm_sandbox_setup_child(alpm_handle_t *handle, const char* sandboxuser, const char* sandbox_path, bool restrict_syscalls)
