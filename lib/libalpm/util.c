@@ -174,15 +174,16 @@ int _alpm_copyfile(const char *src, const char *dest)
 	}
 
 	/* do the actual file copy */
-	while((nread = read(in, buf, ALPM_BUFFER_SIZE)) > 0 || errno == EINTR) {
+	while((nread = read(in, buf, ALPM_BUFFER_SIZE)) > 0 || (nread < 0 && errno == EINTR)) {
 		ssize_t nwrite = 0;
 		if(nread < 0) {
 			continue;
 		}
 		do {
-			nwrite = write(out, buf + nwrite, nread);
-			if(nwrite >= 0) {
-				nread -= nwrite;
+			ssize_t written = write(out, buf + nwrite, nread);
+			if(written >= 0) {
+				nwrite += written;
+				nread -= written;
 			} else if(errno != EINTR) {
 				goto cleanup;
 			}
@@ -1075,7 +1076,7 @@ static int md5_file(const char *path, unsigned char output[16])
 	md5_init(&ctx);
 #endif
 
-	while((n = read(fd, buf, ALPM_BUFFER_SIZE)) > 0 || errno == EINTR) {
+	while((n = read(fd, buf, ALPM_BUFFER_SIZE)) > 0 || (n < 0 && errno == EINTR)) {
 		if(n < 0) {
 			continue;
 		}
@@ -1134,7 +1135,7 @@ static int sha256_file(const char *path, unsigned char output[32])
 	sha256_init(&ctx);
 #endif
 
-	while((n = read(fd, buf, ALPM_BUFFER_SIZE)) > 0 || errno == EINTR) {
+	while((n = read(fd, buf, ALPM_BUFFER_SIZE)) > 0 || (n < 0 && errno == EINTR)) {
 		if(n < 0) {
 			continue;
 		}
