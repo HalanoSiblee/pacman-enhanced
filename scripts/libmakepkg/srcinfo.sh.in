@@ -98,6 +98,7 @@ srcinfo_write_global() {
 	                   noextract options backup
 	                   source validpgpkeys "${known_hash_algos[@]/%/sums}")
 
+	sed -n '/^#/{p;b};q' "$BUILDFILE"
 	srcinfo_open_section 'pkgbase' "${pkgbase:-$pkgname}"
 	srcinfo_write_section_details ''
 }
