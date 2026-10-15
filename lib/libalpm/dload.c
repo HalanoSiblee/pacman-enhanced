@@ -507,6 +507,7 @@ static int curl_check_finished_download(alpm_handle_t *handle, CURLM *curlm, CUR
 	curl_off_t remote_size;
 	curl_off_t bytes_dl = 0;
 	long remote_time = -1;
+	long auth = CURLAUTH_NONE;
 	struct stat st;
 	char hostname[HOSTNAME_SIZE];
 	int ret = -1;
@@ -609,6 +610,7 @@ static int curl_check_finished_download(alpm_handle_t *handle, CURLM *curlm, CUR
 	curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD_T, &bytes_dl);
 	curl_easy_getinfo(curl, CURLINFO_CONDITION_UNMET, &timecond);
 	curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &effective_url);
+	curl_easy_getinfo(curl, CURLINFO_HTTPAUTH_USED, &auth);
 
 	/* Let's check if client requested downloading accompanion *.sig file */
 	if(!payload->signature && payload->download_signature && curlerr == CURLE_OK && payload->respcode < 400) {
@@ -629,8 +631,11 @@ static int curl_check_finished_download(alpm_handle_t *handle, CURLM *curlm, CUR
 			query[0] = '\0';
 		}
 
-		/* Only use the effective url for sig downloads if the effective_url contains .dbext or .pkg */
-		if(strstr(effective_filename, dbext) || strstr(effective_filename, ".pkg")) {
+		/* Only use the effective url for sig downloads if the effective_url contains .dbext or .pkg
+		   Also do *NOT* use the effective url when authentication was used (mirror with username and
+		   passwort, e.g. packagers' tier0) as curl strips credentials! */
+		if((strstr(effective_filename, dbext) || strstr(effective_filename, ".pkg"))
+				&& auth == CURLAUTH_NONE) {
 			url = effective_url;
 		}
 
