@@ -100,6 +100,8 @@ int _alpm_local_db_prepare(alpm_db_t *db, alpm_pkg_t *info);
 int _alpm_local_db_write(alpm_db_t *db, alpm_pkg_t *info, int inforeq);
 int _alpm_local_db_remove(alpm_db_t *db, alpm_pkg_t *info);
 char *_alpm_local_db_pkgpath(alpm_db_t *db, alpm_pkg_t *info, const char *filename);
+int _alpm_local_db_set_blob(alpm_db_t *db, alpm_pkg_t *info,
+		const char *kind, const void *data, size_t len);
 
 /* cache bullshit */
 /* packages */

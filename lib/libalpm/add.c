@@ -168,8 +168,14 @@ static int try_rename(alpm_handle_t *handle, const char *src, const char *dest)
 static int extract_db_file(alpm_handle_t *handle, struct archive *archive,
 		struct archive_entry *entry, alpm_pkg_t *newpkg, const char *entryname)
 {
-	char filename[PATH_MAX]; /* the actual file we're extracting */
 	const char *dbfile = NULL;
+	char *buf = NULL;
+	size_t bufsize = 0, bufused = 0;
+	la_ssize_t nread;
+	const void *block;
+	size_t size;
+	la_int64_t offset;
+
 	if(strcmp(entryname, ".INSTALL") == 0) {
 		dbfile = "install";
 	} else if(strcmp(entryname, ".CHANGELOG") == 0) {
@@ -177,15 +183,36 @@ static int extract_db_file(alpm_handle_t *handle, struct archive *archive,
 	} else if(strcmp(entryname, ".MTREE") == 0) {
 		dbfile = "mtree";
 	} else if(*entryname == '.') {
-		/* reserve all files starting with '.' for future possibilities */
 		_alpm_log(handle, ALPM_LOG_DEBUG, "skipping extraction of '%s'\n", entryname);
 		archive_read_data_skip(archive);
 		return 0;
 	}
-	archive_entry_set_perm(entry, 0644);
-	snprintf(filename, PATH_MAX, "%s%s-%s/%s",
-			_alpm_db_path(handle->db_local), newpkg->name, newpkg->version, dbfile);
-	return perform_extraction(handle, archive, entry, filename);
+
+	while((nread = archive_read_data_block(archive, &block, &size, &offset)) == ARCHIVE_OK) {
+		if(bufused + size + 1 > bufsize) {
+			size_t newsize = bufsize ? bufsize * 2 : 4096;
+			while(newsize < bufused + size + 1) newsize *= 2;
+			char *tmp = realloc(buf, newsize);
+			if(!tmp) { free(buf); return 1; }
+			buf = tmp;
+			bufsize = newsize;
+		}
+		memcpy(buf + bufused, block, size);
+		bufused += size;
+	}
+	if(nread != ARCHIVE_EOF) {
+		free(buf);
+		return 1;
+	}
+	if(buf && bufused)
+		buf[bufused] = '\0';
+
+	if(_alpm_local_db_set_blob(handle->db_local, newpkg, dbfile, buf ? buf : "", bufused) != 0) {
+		free(buf);
+		return 1;
+	}
+	free(buf);
+	return 0;
 }
 
 static int extract_single_file(alpm_handle_t *handle, struct archive *archive,

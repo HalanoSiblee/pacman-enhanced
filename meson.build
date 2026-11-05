@@ -126,6 +126,13 @@ libseccomp = dependency('libseccomp',
                         static : get_option('buildstatic'),
                         required : false)
 conf.set('HAVE_LIBSECCOMP', libseccomp.found())
+
+liblmdb = dependency('lmdb', required : true,
+  static : get_option('buildstatic'), method : 'pkg-config')
+if not liblmdb.found()
+  liblmdb = cc.find_library('lmdb', required : true)
+endif
+conf.set('HAVE_LMDB', 1)
 foreach header : [
     'linux/landlock.h',
     'mntent.h',
@@ -332,7 +339,7 @@ libcommon = static_library(
   gnu_symbol_visibility : 'hidden',
   install : false)
 
-alpm_deps = [crypto_provider, libarchive, libcurl, libintl, libseccomp, gpgme]
+alpm_deps = [crypto_provider, libarchive, libcurl, libintl, libseccomp, gpgme, liblmdb]
 
 libalpm_a = static_library(
   'alpm_objlib',
