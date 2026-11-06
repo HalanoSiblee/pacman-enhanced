@@ -52,54 +52,92 @@ static int local_db_read(alpm_pkg_t *info, int inforeq);
 		} \
 	} while(0)
 
-/* ---------- LMDB helpers ---------- */
+	
+	/* ---------- LMDB env cache ---------- */
 
-static int lmdb_env_open(alpm_db_t *db, MDB_env **env_out, int rdonly)
-{
-	char path[PATH_MAX];
-	const char *dbpath;
+struct lmdb_backend {
 	MDB_env *env;
-	int rc, flags = MDB_NOSUBDIR;
+	MDB_dbi dbi;
+	int rw;   /* opened read-write? */
+};
 
-	dbpath = _alpm_db_path(db);
-	if(!dbpath) return -1;
-
-	snprintf(path, sizeof(path), "%s%s", dbpath, LMDB_ENV_NAME);
-
-	rc = mdb_env_create(&env);
-	if(rc) return -1;
-	rc = mdb_env_set_mapsize(env, LMDB_MAPSIZE);
-	if(rc) { mdb_env_close(env); return -1; }
-	if(rdonly) flags |= MDB_RDONLY;
-	rc = mdb_env_open(env, path, flags, 0644);
-	if(rc) {
-		mdb_env_close(env);
-		return -1;
-	}
-	*env_out = env;
-	return 0;
+static void lmdb_backend_destroy(struct lmdb_backend *b)
+{
+	if(!b) return;
+	if(b->env) mdb_env_close(b->env);
+	free(b);
 }
 
+void _alpm_local_db_close(alpm_db_t *db)
+{
+	if(!db) return;
+	lmdb_backend_destroy(db->backend_data);
+	db->backend_data = NULL;
+}
+
+static struct lmdb_backend *lmdb_backend_get(alpm_db_t *db)
+{
+	if(db->backend_data) return db->backend_data;
+
+	const char *dbpath = _alpm_db_path(db);
+	if(!dbpath) return NULL;
+
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "%s%s", dbpath, LMDB_ENV_NAME);
+
+	MDB_env *env;
+	if(mdb_env_create(&env)) return NULL;
+	mdb_env_set_mapsize(env, LMDB_MAPSIZE);
+
+	int rw;
+	int rc = mdb_env_open(env, path, MDB_NOSUBDIR, 0644);
+	if(rc == 0) {
+		rw = 1;
+	} else {
+		/* Unprivileged queries: fall back to read-only. */
+		rc = mdb_env_open(env, path, MDB_NOSUBDIR | MDB_RDONLY, 0644);
+		if(rc) { mdb_env_close(env); return NULL; }
+		rw = 0;
+	}
+
+	struct lmdb_backend *b = calloc(1, sizeof(*b));
+	if(!b) { mdb_env_close(env); return NULL; }
+	b->env = env;
+	b->rw = rw;
+
+	/* Open the unnamed DBI once and cache it. Always succeeds (unnamed DB
+	 * is always present), works on RO txns too. */
+	MDB_txn *txn;
+	rc = mdb_txn_begin(env, NULL, rw ? 0 : MDB_RDONLY, &txn);
+	if(rc) { lmdb_backend_destroy(b); return NULL; }
+	rc = mdb_dbi_open(txn, NULL, 0, &b->dbi);
+	if(rc) { mdb_txn_abort(txn); lmdb_backend_destroy(b); return NULL; }
+	mdb_txn_commit(txn);
+
+	db->backend_data = b;
+	return b;
+}
+
+/* ---------- LMDB helpers ---------- */
 static int lmdb_get(alpm_db_t *db, const char *key, char **val, size_t *vlen)
 {
-	MDB_env *env = NULL;
+	struct lmdb_backend *b;
 	MDB_txn *txn = NULL;
-	MDB_dbi dbi;
 	MDB_val k, d;
 	int rc, ret = -1;
 
 	*val = NULL;
 	if(vlen) *vlen = 0;
 
-	if(lmdb_env_open(db, &env, 1) != 0) return -1;
-	rc = mdb_txn_begin(env, NULL, MDB_RDONLY, &txn);
-	if(rc) goto out;
-	rc = mdb_dbi_open(txn, NULL, 0, &dbi);
-	if(rc) goto out;
+	b = lmdb_backend_get(db);
+	if(!b) return -1;
+
+	rc = mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn);
+	if(rc) return -1;
 
 	k.mv_data = (void *)key;
 	k.mv_size = strlen(key);
-	rc = mdb_get(txn, dbi, &k, &d);
+	rc = mdb_get(txn, b->dbi, &k, &d);
 	if(rc == MDB_NOTFOUND) { ret = 1; goto out; }
 	if(rc) goto out;
 
@@ -109,30 +147,28 @@ static int lmdb_get(alpm_db_t *db, const char *key, char **val, size_t *vlen)
 	if(vlen) *vlen = d.mv_size;
 	ret = 0;
 out:
-	if(txn) mdb_txn_abort(txn);
-	if(env) mdb_env_close(env);
+	mdb_txn_abort(txn);
 	return ret;
 }
 
 static int lmdb_put(alpm_db_t *db, const char *key, const void *data, size_t len)
 {
-	MDB_env *env = NULL;
+	struct lmdb_backend *b;
 	MDB_txn *txn = NULL;
-	MDB_dbi dbi;
 	MDB_val k, d;
 	int rc, ret = -1;
 
-	if(lmdb_env_open(db, &env, 0) != 0) return -1;
-	rc = mdb_txn_begin(env, NULL, 0, &txn);
-	if(rc) goto out;
-	rc = mdb_dbi_open(txn, NULL, MDB_CREATE, &dbi);
-	if(rc) goto out;
+	b = lmdb_backend_get(db);
+	if(!b || !b->rw) return -1;
+
+	rc = mdb_txn_begin(b->env, NULL, 0, &txn);
+	if(rc) return -1;
 
 	k.mv_data = (void *)key;
 	k.mv_size = strlen(key);
 	d.mv_data = (void *)data;
 	d.mv_size = len;
-	rc = mdb_put(txn, dbi, &k, &d, 0);
+	rc = mdb_put(txn, b->dbi, &k, &d, 0);
 	if(rc) goto out;
 	rc = mdb_txn_commit(txn);
 	txn = NULL;
@@ -140,30 +176,27 @@ static int lmdb_put(alpm_db_t *db, const char *key, const void *data, size_t len
 	ret = 0;
 out:
 	if(txn) mdb_txn_abort(txn);
-	if(env) mdb_env_close(env);
 	return ret;
 }
 
 static int lmdb_del_prefix(alpm_db_t *db, const char *name)
 {
-	/* delete p:, d:, f:, s:, m:, c: for this package */
 	static const char *prefs[] = { "p:", "d:", "f:", "s:", "m:", "c:" };
-	MDB_env *env = NULL;
+	struct lmdb_backend *b;
 	MDB_txn *txn = NULL;
-	MDB_dbi dbi;
 	int rc, i, ret = -1;
 	char key[512];
 
-	if(lmdb_env_open(db, &env, 0) != 0) return -1;
-	rc = mdb_txn_begin(env, NULL, 0, &txn);
-	if(rc) goto out;
-	rc = mdb_dbi_open(txn, NULL, 0, &dbi);
-	if(rc) goto out;
+	b = lmdb_backend_get(db);
+	if(!b || !b->rw) return -1;
+
+	rc = mdb_txn_begin(b->env, NULL, 0, &txn);
+	if(rc) return -1;
 
 	for(i = 0; i < 6; i++) {
 		snprintf(key, sizeof(key), "%s%s", prefs[i], name);
 		MDB_val k = { .mv_data = key, .mv_size = strlen(key) };
-		mdb_del(txn, dbi, &k, NULL); /* ignore notfound */
+		mdb_del(txn, b->dbi, &k, NULL);
 	}
 	rc = mdb_txn_commit(txn);
 	txn = NULL;
@@ -171,10 +204,8 @@ static int lmdb_del_prefix(alpm_db_t *db, const char *name)
 	ret = 0;
 out:
 	if(txn) mdb_txn_abort(txn);
-	if(env) mdb_env_close(env);
 	return ret;
 }
-
 /* store arbitrary blob (scriptlet/mtree/changelog) */
 int _alpm_local_db_set_blob(alpm_db_t *db, alpm_pkg_t *info,
 		const char *kind, const void *data, size_t len)
@@ -322,37 +353,21 @@ static const struct pkg_operations local_pkg_ops = {
 
 static int local_db_create(alpm_db_t *db, const char *dbpath)
 {
-	char path[PATH_MAX];
-	MDB_env *env = NULL;
-	MDB_txn *txn = NULL;
-	MDB_dbi dbi;
-	MDB_val k, d;
 	char ver[32];
-	int rc;
 
-	if(mkdir(dbpath, 0755) != 0 && errno != EEXIST) {
+	if(mkdir(dbpath, 0755) != 0 && errno != EEXIST)
 		RET_ERR(db->handle, ALPM_ERR_DB_CREATE, -1);
-	}
-	snprintf(path, sizeof(path), "%s%s", dbpath, LMDB_ENV_NAME);
-	rc = mdb_env_create(&env);
-	if(rc) RET_ERR(db->handle, ALPM_ERR_DB_CREATE, -1);
-	mdb_env_set_mapsize(env, LMDB_MAPSIZE);
-	rc = mdb_env_open(env, path, MDB_NOSUBDIR, 0644);
-	if(rc) { mdb_env_close(env); RET_ERR(db->handle, ALPM_ERR_DB_CREATE, -1); }
-	rc = mdb_txn_begin(env, NULL, 0, &txn);
-	if(rc) { mdb_env_close(env); RET_ERR(db->handle, ALPM_ERR_DB_CREATE, -1); }
-	rc = mdb_dbi_open(txn, NULL, MDB_CREATE, &dbi);
-	if(rc) { mdb_txn_abort(txn); mdb_env_close(env); RET_ERR(db->handle, ALPM_ERR_DB_CREATE, -1); }
+
+	/* First call opens & caches the env, creating data.mdb / lock.mdb. */
+	if(!lmdb_backend_get(db))
+		RET_ERR(db->handle, ALPM_ERR_DB_CREATE, -1);
 
 	snprintf(ver, sizeof(ver), "%zu", ALPM_LOCAL_DB_VERSION);
-	k.mv_data = "\0version"; k.mv_size = 8;
-	d.mv_data = ver; d.mv_size = strlen(ver);
-	mdb_put(txn, dbi, &k, &d, 0);
-	mdb_txn_commit(txn);
-	mdb_env_close(env);
+	if(lmdb_put(db, "version", ver, strlen(ver)) != 0)
+		RET_ERR(db->handle, ALPM_ERR_DB_CREATE, -1);
+
 	return 0;
 }
-
 static int local_db_validate(alpm_db_t *db)
 {
 	const char *dbpath;
@@ -381,11 +396,12 @@ static int local_db_validate(alpm_db_t *db)
 	db->status |= DB_STATUS_EXISTS;
 	db->status &= ~DB_STATUS_MISSING;
 
-	if(lmdb_get(db, "\0version", &ver, NULL) != 0 || !ver) {
-		db->status |= DB_STATUS_INVALID;
-		db->handle->pm_errno = ALPM_ERR_DB_VERSION;
-		return -1;
+	if(lmdb_get(db, "version", &ver, NULL) != 0 || !ver) {
+    db->status |= DB_STATUS_INVALID;
+    db->handle->pm_errno = ALPM_ERR_DB_VERSION;
+    return -1;
 	}
+	
 	version = strtoul(ver, NULL, 10);
 	free(ver);
 	if(version != ALPM_LOCAL_DB_VERSION) {
@@ -397,12 +413,10 @@ static int local_db_validate(alpm_db_t *db)
 	db->status &= ~DB_STATUS_INVALID;
 	return 0;
 }
-
 static int local_db_populate(alpm_db_t *db)
 {
-	MDB_env *env = NULL;
+	struct lmdb_backend *b;
 	MDB_txn *txn = NULL;
-	MDB_dbi dbi;
 	MDB_cursor *cur = NULL;
 	MDB_val key, data;
 	size_t count = 0, est = 0;
@@ -413,14 +427,13 @@ static int local_db_populate(alpm_db_t *db)
 	if(db->status & DB_STATUS_MISSING)
 		RET_ERR(db->handle, ALPM_ERR_DB_NOT_FOUND, -1);
 
-	if(lmdb_env_open(db, &env, 1) != 0)
-		RET_ERR(db->handle, ALPM_ERR_DB_OPEN, -1);
-	rc = mdb_txn_begin(env, NULL, MDB_RDONLY, &txn);
-	if(rc) { mdb_env_close(env); RET_ERR(db->handle, ALPM_ERR_DB_OPEN, -1); }
-	rc = mdb_dbi_open(txn, NULL, 0, &dbi);
-	if(rc) { mdb_txn_abort(txn); mdb_env_close(env); RET_ERR(db->handle, ALPM_ERR_DB_OPEN, -1); }
-	rc = mdb_cursor_open(txn, dbi, &cur);
-	if(rc) { mdb_txn_abort(txn); mdb_env_close(env); RET_ERR(db->handle, ALPM_ERR_DB_OPEN, -1); }
+	b = lmdb_backend_get(db);
+	if(!b) RET_ERR(db->handle, ALPM_ERR_DB_OPEN, -1);
+
+	rc = mdb_txn_begin(b->env, NULL, MDB_RDONLY, &txn);
+	if(rc) RET_ERR(db->handle, ALPM_ERR_DB_OPEN, -1);
+	rc = mdb_cursor_open(txn, b->dbi, &cur);
+	if(rc) { mdb_txn_abort(txn); RET_ERR(db->handle, ALPM_ERR_DB_OPEN, -1); }
 
 	/* count packages */
 	while(mdb_cursor_get(cur, &key, &data, MDB_NEXT) == 0) {
@@ -429,7 +442,7 @@ static int local_db_populate(alpm_db_t *db)
 
 	db->pkgcache = _alpm_pkghash_create(est ? est : 16);
 	if(!db->pkgcache) {
-		mdb_cursor_close(cur); mdb_txn_abort(txn); mdb_env_close(env);
+		mdb_cursor_close(cur); mdb_txn_abort(txn);
 		RET_ERR(db->handle, ALPM_ERR_MEMORY, -1);
 	}
 
@@ -439,50 +452,47 @@ static int local_db_populate(alpm_db_t *db)
 			char namever[512];
 			alpm_pkg_t *pkg;
 
-			if(data.mv_size >= sizeof(namever)) { rc = mdb_cursor_get(cur, &key, &data, MDB_NEXT); continue; }
-			memcpy(namever, data.mv_data, data.mv_size);
-			namever[data.mv_size] = '\0';
+			if(data.mv_size < sizeof(namever)) {
+				memcpy(namever, data.mv_data, data.mv_size);
+				namever[data.mv_size] = '\0';
 
-			pkg = _alpm_pkg_new();
-			if(!pkg) {
-				mdb_cursor_close(cur); mdb_txn_abort(txn); mdb_env_close(env);
-				RET_ERR(db->handle, ALPM_ERR_MEMORY, -1);
-			}
-			if(_alpm_splitname(namever, &pkg->name, &pkg->version, &pkg->name_hash) != 0) {
-				_alpm_pkg_free(pkg);
-				rc = mdb_cursor_get(cur, &key, &data, MDB_NEXT);
-				continue;
-			}
-			if(_alpm_pkghash_find(db->pkgcache, pkg->name)) {
-				_alpm_pkg_free(pkg);
-				rc = mdb_cursor_get(cur, &key, &data, MDB_NEXT);
-				continue;
-			}
-			pkg->origin = ALPM_PKG_FROM_LOCALDB;
-			pkg->origin_data.db = db;
-			pkg->ops = &local_pkg_ops;
-			pkg->handle = db->handle;
+				pkg = _alpm_pkg_new();
+				if(!pkg) {
+					mdb_cursor_close(cur); mdb_txn_abort(txn);
+					RET_ERR(db->handle, ALPM_ERR_MEMORY, -1);
+				}
+				if(_alpm_splitname(namever, &pkg->name, &pkg->version,
+						&pkg->name_hash) != 0 ||
+				   _alpm_pkghash_find(db->pkgcache, pkg->name)) {
+					_alpm_pkg_free(pkg);
+					goto next;
+				}
+				pkg->origin = ALPM_PKG_FROM_LOCALDB;
+				pkg->origin_data.db = db;
+				pkg->ops = &local_pkg_ops;
+				pkg->handle = db->handle;
 
-			if(local_db_read(pkg, INFRQ_BASE) == -1) {
-				_alpm_log(db->handle, ALPM_LOG_ERROR, _("corrupted database entry '%s'\n"), namever);
-				_alpm_pkg_free(pkg);
-				rc = mdb_cursor_get(cur, &key, &data, MDB_NEXT);
-				continue;
+				if(local_db_read(pkg, INFRQ_BASE) == -1) {
+					_alpm_log(db->handle, ALPM_LOG_ERROR,
+							_("corrupted database entry '%s'\n"), namever);
+					_alpm_pkg_free(pkg);
+					goto next;
+				}
+				_alpm_pkg_check_meta(pkg);
+				if(_alpm_pkghash_add(&db->pkgcache, pkg) == NULL) {
+					_alpm_pkg_free(pkg);
+					mdb_cursor_close(cur); mdb_txn_abort(txn);
+					RET_ERR(db->handle, ALPM_ERR_MEMORY, -1);
+				}
+				count++;
 			}
-			_alpm_pkg_check_meta(pkg);
-			if(_alpm_pkghash_add(&db->pkgcache, pkg) == NULL) {
-				_alpm_pkg_free(pkg);
-				mdb_cursor_close(cur); mdb_txn_abort(txn); mdb_env_close(env);
-				RET_ERR(db->handle, ALPM_ERR_MEMORY, -1);
-			}
-			count++;
 		}
+next:
 		rc = mdb_cursor_get(cur, &key, &data, MDB_NEXT);
 	}
 
 	mdb_cursor_close(cur);
 	mdb_txn_abort(txn);
-	mdb_env_close(env);
 
 	if(count > 0)
 		db->pkgcache->list = alpm_list_msort(db->pkgcache->list, count, _alpm_pkg_cmp);
@@ -490,7 +500,6 @@ static int local_db_populate(alpm_db_t *db)
 			count, db->treename);
 	return 0;
 }
-
 /* path helper: for scriptlet/mtree/changelog materialize; for NULL return db root */
 char *_alpm_local_db_pkgpath(alpm_db_t *db, alpm_pkg_t *info, const char *filename)
 {

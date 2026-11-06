@@ -80,6 +80,7 @@ struct _alpm_db_t {
 	int siglevel;
 	/* alpm_db_usage_t */
 	int usage;
+    void *backend_data;
 };
 
 
@@ -94,6 +95,8 @@ alpm_db_t *_alpm_db_register_local(alpm_handle_t *handle);
 alpm_db_t *_alpm_db_register_sync(alpm_handle_t *handle, const char *treename,
 		int level);
 void _alpm_db_unregister(alpm_db_t *db);
+
+void _alpm_local_db_close(alpm_db_t *db);
 
 /* be_*.c, backend specific calls */
 int _alpm_local_db_prepare(alpm_db_t *db, alpm_pkg_t *info);

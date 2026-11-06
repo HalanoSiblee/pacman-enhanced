@@ -154,8 +154,9 @@ int main(int argc, char **argv)
 	}
 
 	/* version key */
-	k.mv_data = "\0version";
-	k.mv_size = 8;
+	/* version key */
+	k.mv_data = "version";
+	k.mv_size = 7;
 	d.mv_data = verbuf;
 	d.mv_size = strlen(verbuf);
 	if(mdb_put(txn, dbi, &k, &d, 0)) {
